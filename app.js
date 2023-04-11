@@ -36,23 +36,27 @@ const { User } = require('./entity/entity.js')
 
 app.post('/api/user/login', async (req, res) => {
   const { username, password } = req.body
+  console.log('form ->', username, password);
   const user = await User.findOne({ where: { username: username } })
-  if (user === null) return res.status(200).json({ status: 0, message: '用户不存在' })
-  if (user.password !== password) return res.status(200).json({ status: 0, message: '密码错误' })
+  if (user === null) return res.status(200).json({ status: 0, msg: '用户不存在', data:'' })
+  if (user.password !== password) return res.status(200).json({ status: 0, msg: '密码错误', data: '' })
+
+  console.log(username, password);
 
   const token = jwt.sign({ id: user.id, username: username }, "jwtkey")
   const { ...other } = user.dataValues
+  delete other.password
 
   res
     .cookie("access_token", token, {
       httpOnly: true,
     })
     .status(200)
-    .json(other)
+    .json({ status: 1, msg: '登录成功', data: other })
 })
 
 app.post('/api/user/get', async (req, res)=> {
-  console.log('--',req.cookies);
+  console.log('------',req.cookies);
 })
 app.post('/api/user/register', async (req, res) => {
   console.log('------------');
@@ -73,7 +77,7 @@ app.post('/api/user/register', async (req, res) => {
       email: email
     }
   })
-  if (!created) return res.status(200).json({ status: 0, message: '该用户名或者邮箱已被注册' })
+  if (!created) return res.status(200).json({ status: 0, msg: '该用户名或者邮箱已被注册' })
   console.log('--user', user);
   console.log('created---', created);
 
@@ -97,6 +101,6 @@ app.post('/api/user/register', async (req, res) => {
 // })
 
 //启动一个服务并监听从 3000端口进入的所有连接请求
-app.listen(PORT, function () {
+app.listen(3001, function () {
   console.log('服务器开启成功');
 });
