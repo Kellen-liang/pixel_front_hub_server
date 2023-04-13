@@ -2,8 +2,14 @@ const express = require('express')
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const { Op } = require("sequelize");
+const bcrypt = require('bcryptjs');
 const jwt = require("jsonwebtoken")
 const cookieParser = require('cookie-parser')
+const multer  = require('multer')
+const path = require('path')
+
+//实例对象
+const { User } = require('./entity/entity.js')
 
 //创建应用对象
 const PORT = 3001
@@ -30,19 +36,46 @@ app.all('*', function (req, res, next) {
   next();
 });
 
+//文件上传
+//① 创建存储空间
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "./uploads");
+  },
+  filename: function (req, file, cb) {
+    //解决中文乱码问题
+    const originalName = file.originalname
+    const encodedName = Buffer.from(originalName,'binary').toString()
+    cb(null, Date.now() + encodedName);
+  },
+});
+const upload = multer({ storage });
+//② 上传文件接口
+app.post("/api/upload", upload.single("file"), function (req, res) {
+  const file = req.file;
+  res.status(200).json({
+    filename: file.filename, 
+    path: `http://localhost:3001/api/getImageUrl/${file.filename}`
+  })
+});
 
-const { User } = require('./entity/entity.js')
-
+//访问文件
+app.get('/api/getImageUrl/:filename', (req, res) => {
+  const { filename } = req.params
+  const imagePath = path.join(__dirname, 'uploads', filename)
+  res.sendFile(imagePath)
+})
 
 app.post('/api/user/login', async (req, res) => {
   const { username, password } = req.body
   console.log('form ->', username, password);
   const user = await User.findOne({ where: { username: username } })
-  if (user === null) return res.status(200).json({ status: 0, msg: '用户不存在', data:'' })
-  if (user.password !== password) return res.status(200).json({ status: 0, msg: '密码错误', data: '' })
-
-  console.log(username, password);
-
+  if (user === null) return res.status(200).json({ status: 0, errmsg: '用户不存在', data:'' })
+  // 密码hash比对
+  const isTruePassword = bcrypt.compareSync(password, user.password)
+  if (!isTruePassword) return res.status(200).json({ status: 0, errmsg: '密码错误', data: '' })
+  
+  //token设置
   const token = jwt.sign({ id: user.id, username: username }, "jwtkey")
   const { ...other } = user.dataValues
   delete other.password
@@ -52,17 +85,19 @@ app.post('/api/user/login', async (req, res) => {
       httpOnly: true,
     })
     .status(200)
-    .json({ status: 1, msg: '登录成功', data: other })
+    .json({ status: 1, errmsg: '', data: other })
 })
 
 app.post('/api/user/get', async (req, res)=> {
   console.log('------',req.cookies);
 })
+
 app.post('/api/user/register', async (req, res) => {
-  console.log('------------');
-  console.log(req.body);
   const { username, password, email } = req.body
 
+  //密码转hash自动加盐
+  const salt = bcrypt.genSaltSync(10);
+  const hashPassword = bcrypt.hashSync(password, salt);
 
   const [user, created] = await User.findOrCreate({
     where: {
@@ -73,14 +108,16 @@ app.post('/api/user/register', async (req, res) => {
     },
     defaults: {
       username: username,
-      password: password,
+      password: hashPassword,
       email: email
     }
   })
-  if (!created) return res.status(200).json({ status: 0, msg: '该用户名或者邮箱已被注册' })
-  console.log('--user', user);
-  console.log('created---', created);
-
+  if (created) {
+    return res.status(200).json({ status: 1, errmsg: '', data:'注册成功' })
+  } 
+  else {
+    return res.status(200).json({ status: 0, errmsg: '该用户名或者邮箱已被注册', data:'' })
+  }
 })
 // app.get('/', async (req, res) => {
 
@@ -101,6 +138,6 @@ app.post('/api/user/register', async (req, res) => {
 // })
 
 //启动一个服务并监听从 3000端口进入的所有连接请求
-app.listen(3001, function () {
+app.listen(PORT, function () {
   console.log('服务器开启成功');
 });
