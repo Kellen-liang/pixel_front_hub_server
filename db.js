@@ -3,6 +3,10 @@ const { Sequelize } = require('sequelize');
 const sequelize = new Sequelize('community', 'root', 'root', {
   host: 'localhost',
   dialect: 'mysql',
+  define: {
+    // 设置默认值为0
+    defaultValue: 0,
+  },
 });
 
 // try {

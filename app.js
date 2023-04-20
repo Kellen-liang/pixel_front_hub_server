@@ -11,7 +11,7 @@ const path = require('path')
 const _ = require('lodash');
 
 //实例对象
-const { User, Article, LikeCollectCount } = require('./entity/entity.js')
+const { User, Article, LikeCollectCount, Comment, Reply } = require('./entity/entity.js')
 
 //创建应用对象
 const PORT = 3001
@@ -78,21 +78,49 @@ app.post('/api/user/login', async (req, res) => {
   if (!isTruePassword) return res.status(200).json({ status: 0, errmsg: '密码错误', data: '' })
 
   //token设置
-  const token = jwt.sign({ id: user.id, username: username }, "jwtkey")
+  const token = jwt.sign({ id: user.id, username: username, user_icon: user.user_icon }, "jwtkey")
   const { ...other } = user.dataValues
   delete other.password
+
+  const likes = await LikeCollectCount.findAll({
+    where: {
+      [Op.and]: [
+        { user_id: user.id },
+        {
+          like_id: {
+            [Op.not]: null
+          }
+        }
+      ]
+    }
+  }) || []
+
+  const collects = await LikeCollectCount.findAll({
+    where: {
+      [Op.and]: [
+        { user_id: user.id },
+        {
+          collect_id: {
+            [Op.not]: null
+          }
+        }
+      ]
+    }
+  }) || []
 
   res
     .cookie("access_token", token, {
       httpOnly: true,
     })
     .status(200)
-    .json({ status: 1, errmsg: '', data: other })
+    .json({ status: 1, errmsg: '', data: { ...other, likeCount: likes.length, collectCount: collects.length } })
 })
 
 app.post('/api/user/logout', async (req, res) => {
-
-
+  res.clearCookie("access_token", {
+    sameSite: "none",
+    secure: true
+  }).status(200).json({ status: 1, errmsg: '', data: '退出登录成功' })
 })
 
 app.post('/api/user/register', async (req, res) => {
@@ -189,13 +217,17 @@ app.post('/api/article/create', async (req, res) => {
 //查询文章
 app.get('/api/article/getArticle', async (req, res) => {
   const { tag = '', category = '', article_title = '' } = req.query
+  console.log('tag', tag);
+  console.log('category', category);
+  console.log('article_title', article_title);
 
   //获取token
   const token = req.cookies.access_token;
   let user_id, username
   jwt.verify(token, 'jwtkey', function (err, userInfo) {
     user_id = userInfo.id
-    username = userInfo.username
+    username = userInfo.username,
+    user_icon = userInfo.user_icon
   })
 
   //分页:
@@ -353,7 +385,7 @@ app.get('/api/article/getArticle', async (req, res) => {
       break
     default:
       articels =
-        await Article.findAll({...setting})
+        await Article.findAll({ ...setting })
       total = await Article.count()
       console.log(0);
       break
@@ -363,9 +395,16 @@ app.get('/api/article/getArticle', async (req, res) => {
     return res.status(200).json({ status: 0, errmsg: '服务器出错', data: '' })
   }
 
-  console.log('articels', articels);
+  // console.log('articels', articels);
 
-  const handleList = articels.map(item => item.dataValues)
+
+  const handleList = await Promise.all(articels.map(async item => {
+    const count1 = await Comment.count({ where: { article_id: item.id } }) || 0
+    const count2 = await Reply.count({ where: { article_id: item.id } }) || 0
+    item.comment_count = count1 + count2
+    await item.save()
+    return item.dataValues
+  }))
   const articelList = await Promise.all(handleList.map(async item => {
     const like = await LikeCollectCount.findOne({
       where: {
@@ -394,8 +433,10 @@ app.get('/api/article/getArticle', async (req, res) => {
       }
     })
 
+    const user = await User.findByPk(item.user_id)
     return {
       ...item,
+      user_icon: user.user_icon,
       is_like: like ? true : false,
       is_collect: collect ? true : false
     }
@@ -408,7 +449,7 @@ app.get('/api/article/getArticle', async (req, res) => {
 
 //查询指定文章
 app.get('/api/article/getArticle_id', async (req, res) => {
-  const { id } = req.query
+  const { id, edit = false } = req.query
 
   //获取token
   const token = req.cookies.access_token;
@@ -421,12 +462,18 @@ app.get('/api/article/getArticle_id', async (req, res) => {
   const article = await Article.findByPk(id)
 
   if (article === null) {
-    return res.status(200).json({ status: 0, errmsg: '服务器出错', data: '' })
+    return res.status(200).json({ status: 0, errmsg: '查询不到改文章', data: '' })
   }
 
-  console.log('article', article);
+  //点击查看时，点击数+1
+  !edit && await Article.increment({ count: 1 }, { where: { id: id } })
+  //  article.count = article.count + 1
+  // await article.save()
+
 
   const handleArticle = article.dataValues
+
+
   const like = await LikeCollectCount.findOne({
     where: {
       [Op.and]: [
@@ -454,22 +501,96 @@ app.get('/api/article/getArticle_id', async (req, res) => {
     }
   })
 
+  const user = await User.findByPk(handleArticle.user_id)
 
   return res.status(200).json({
     status: 1,
     errmsg: '',
     data: {
-      ...article,
+      ...handleArticle,
+      user_icon: user.user_icon,
+      isMine: user.id === user_id ? true : false,
       is_like: like ? true : false,
       is_collect: collect ? true : false
     },
-    total,
-    page,
-    pageSize
   })
 })
 
+//查询指定用户文章列表
+app.get('/api/article/getArticle_user_id', async (req, res) => {
+  const { id } = req.query
+  const articles = await Article.findAll({
+    order: [['updatedAt', 'DESC']],
+    where : {
+      user_id : id
+    }
+  })
+  const user = await User.findByPk(id)
 
+  const tempArticles = articles.map(item => item.dataValues)
+  const data = await Promise.all(tempArticles.map(async item => {
+    const like = await LikeCollectCount.findOne({
+      where: {
+        [Op.and]: [
+          { user_id: item.user_id },
+          { article_id: item.id },
+          {
+            like_id: {
+              [Op.not]: null
+            }
+          }
+        ]
+      }
+    })
+    return {
+      ...item,
+      user_icon: user.user_icon,
+      is_like: like ? true : false,
+    }
+  }))
+
+  return res.status(200).json({ status: 1, errmsg: '', data: data})
+})
+
+//删除指定文章
+app.post('/api/article/deleteArticle', async (req, res) => {
+  const { id } = req.body
+  const article = await Article.findByPk(id)
+  console.log('article---', article);
+  if (article === null) return res.status(200).json({ status: 0, errmsg: `删除失败，未找到id为${id}的文章`, data: '' })
+  await article.destroy()
+  const LikeAndCollect = await LikeCollectCount.findAll({ where: { article_id: id } })
+  await Promise.all(LikeAndCollect.map(async item => {
+    await item.destroy()
+  }))
+  return res.status(200).json({ status: 1, errmsg: '', data: '删除成功' })
+})
+
+//更新文章
+app.post('/api/article/updataArticle', async (req, res) => {
+  const {
+    id,
+    article_title,
+    article_intro,
+    article_cover,
+    article_content,
+    category,
+    tag,
+  } = req.body
+
+  const article = await Article.findByPk(id)
+  article.set({
+    article_title,
+    article_intro,
+    article_cover,
+    article_content,
+    category,
+    tag
+  })
+  const updataArticle = await article.save()
+  if (!updataArticle) return res.status(200).json({ status: 0, errmsg: '修改失败，服务器出错', data: '' })
+  return res.status(200).json({ status: 1, errmsg: '', data: '修改成功' })
+})
 
 //点赞/收藏
 app.post('/api/likeCollectCount/operate', async (req, res) => {
@@ -609,57 +730,422 @@ app.post('/api/likeCollectCount/operate', async (req, res) => {
 
 })
 
-//查询点赞/收藏列表
-app.get('/api/likeCollectCount/search', async (req, res) => {
+//查询点赞文章列表
+app.get('/api/likeCollectCount/searchLikeList', async (req, res) => {
+  const { id } = req.query
+  console.log('id---',id);
+  const dataList = await LikeCollectCount.findAll({
+    order: [['updatedAt', 'DESC']],
+    where: {
+      [Op.and]: [
+        { user_id: id },
+        {
+          like_id: {
+            [Op.not]: null
+          }
+        }
+      ]
+    }
+  }) || []
+  if (dataList.length === 0) return res.status(200).json({ status: 1, errmsg: '', data: [] })
+  const handleList = dataList.map(item => item.dataValues)
+
+  const newDataList = await Promise.all(handleList.map(async item => {
+    const article = await Article.findByPk(item.article_id)
+    const user = await User.findByPk(id)
+    return {
+      ...article.dataValues,
+      user_icon: user.user_icon,
+      is_like: item.like_id ? true : false,
+    }
+
+  }))
+
+  return res.status(200).json({
+    status: 1,
+    errmsg: '',
+    data: newDataList
+  })
+
+})
+
+//查询收藏文章列表
+app.get('/api/likeCollectCount/searchCollectList', async (req, res) => {
+  const { id } = req.query
+  const dataList = await LikeCollectCount.findAll({
+    order: [['updatedAt', 'DESC']],
+    where: {
+      [Op.and]: [
+        { user_id: id },
+        {
+          collect_id: {
+            [Op.not]: null
+          }
+        }
+      ]
+    }
+  }) || []
+  if (dataList.length === 0) return res.status(200).json({ status: 1, errmsg: '', data: [] })
+  const handleList = dataList.map(item => item.dataValues)
+
+  const newDataList = await Promise.all(handleList.map(async item => {
+    const article = await Article.findByPk(item.article_id)
+    const user = await User.findByPk(id)
+    return {
+      ...article.dataValues,
+      user_icon: user.user_icon,
+      is_like: item.like_id ? true : false,
+    }
+
+  }))
+
+  return res.status(200).json({
+    status: 1,
+    errmsg: '',
+    data: newDataList
+  })
+
+})
+
+//创建一条评论
+app.post('/api/comment/create', async (req, res) => {
+  const { article_id, content } = req.body
   //获取token
   const token = req.cookies.access_token;
   if (!token) return res.status(200).json({ status: 0, errmsg: '请登录系统', data: '' })
+  let user_id
 
   jwt.verify(token, 'jwtkey', async (err, userInfo) => {
     if (err) return res.status(200).json({ status: 0, errmsg: err, data: '' })
+    console.log('userInfo', userInfo);
+    user_id = userInfo.id
+  })
 
-    const dataList = await LikeCollectCount.findAll({ where: { user_id: userInfo.id } }) || []
-    if (!dataList.length) return res.status(200).json({ status: 1, errmsg: '', data: [] })
-    const handleList = dataList.map(item => item.dataValues)
+  const comment = await Comment.create({
+    article_id,
+    content,
+    user_id,
+  })
 
-    const newDataList = await Promise.all(handleList.map(async item => {
-      const article = await Article.findByPk(item.article_id) || {}
-      const articleCopy = _.cloneDeep(article.dataValues)
-      delete articleCopy.id
-      delete articleCopy.user_id
-      delete articleCopy.username
-      delete articleCopy.createdAt
-      delete articleCopy.updatedAt
+  if (comment === null) return res.status(200).json({ status: 0, errmsg: '评论失败', data: '' })
+  else return res.status(200).json({ status: 1, errmsg: '', data: '评论成功' })
+})
 
-      return {
-        ...item,
-        ...articleCopy
+//创建一条回复
+app.post('/api/comment/createReply', async (req, res) => {
+  const { article_id, comment_id, reply_late_id, content } = req.body
+  //获取token
+  const token = req.cookies.access_token;
+  if (!token) return res.status(200).json({ status: 0, errmsg: '请登录系统', data: '' })
+  let user_id
+
+  jwt.verify(token, 'jwtkey', async (err, userInfo) => {
+    if (err) return res.status(200).json({ status: 0, errmsg: err, data: '' })
+    user_id = userInfo.id
+  })
+
+  const reply = await Reply.create({
+    article_id,
+    comment_id,
+    user_id,
+    reply_late_id,
+    content,
+  })
+
+  if (reply === null) return res.status(200).json({ status: 0, errmsg: '回复失败', data: '' })
+  else return res.status(200).json({ status: 1, errmsg: '', data: '回复成功' })
+})
+
+//获取评论列表
+app.get('/api/comment/list', async (req, res) => {
+  const { article_id } = req.query
+  //获取token
+  const token = req.cookies.access_token;
+  if (!token) return res.status(200).json({ status: 0, errmsg: '请登录系统', data: '' })
+  let user_id, username
+
+  jwt.verify(token, 'jwtkey', async (err, userInfo) => {
+    if (err) return res.status(200).json({ status: 0, errmsg: err, data: '' })
+    user_id = userInfo.id
+    username = userInfo.username
+  })
+
+  const commentList = await Comment.findAll({
+    order: [['updatedAt', 'DESC']],
+    where: {
+      article_id
+    }
+  })
+
+  const tempList = commentList.map(item => item.dataValues)
+  const data = await Promise.all(tempList.map(async item => {
+    const user = await User.findByPk(item.user_id)
+
+    const replyList = await Reply.findAll({
+      where: {
+        article_id: item.article_id,
+        comment_id: item.id,
       }
-    }))
+    }) || []
 
-    return res.status(200).json({
-      status: 1,
-      errmsg: '',
-      data: {
-        likeList: newDataList.filter(item => item.like_id !== '') || [],
-        collectList: newDataList.filter(item => item.collect_id !== '') || [],
+
+
+    let replyListNew
+    if (replyList.length === 0) {
+      replyListNew = []
+    }
+    else {
+      const tempList = replyList.map(item => item.dataValues)
+      replyListNew = await Promise.all(tempList.map(async reply => {
+        const user = await User.findByPk(reply.user_id)
+        const reply_late = await User.findByPk(reply.reply_late_id)
+        return {
+          ...reply,
+          username: user.username,
+          user_icon: user.user_icon,
+          reply_late: reply_late.username,
+          isMine: reply.user_id === user_id ? true : false,
+        }
+      }))
+    }
+
+
+
+    return {
+      ...item,
+      user_icon: user.user_icon,
+      username: user.username,
+      isMine: item.user_id === user_id ? true : false,
+      reply_comment_list: replyListNew
+    }
+  }))
+
+  return res.status(200).json({ status: 1, errmsg: '', data: data })
+})
+
+//删除评论
+app.post('/api/comment/deleteComment', async (req, res) => {
+  const { id } = req.body
+  const comment = await Comment.findByPk(id)
+  const replys = await Reply.findAll({ where: { comment_id: id } })
+  const all = await Promise.all(replys.map(async item => {
+    await item.destroy()
+  }))
+  if (comment === null) return res.status(200).json({ status: 0, errmsg: `删除失败，未找到id为${id}的评论`, data: '' })
+  await comment.destroy()
+  return res.status(200).json({ status: 1, errmsg: '', data: '删除成功' })
+})
+
+//删除回复
+app.post('/api/comment/deleteReply', async (req, res) => {
+  const { id } = req.body
+  const reply = await Reply.findByPk(id)
+  if (reply === null) return res.status(200).json({ status: 0, errmsg: `删除失败，未找到id为${id}的回复`, data: '' })
+  await reply.destroy()
+  return res.status(200).json({ status: 1, errmsg: '', data: '删除成功' })
+})
+
+//message点赞列表
+app.get('/api/message/likeList', async (req, res) => {
+  //获取token
+  const token = req.cookies.access_token;
+  if (!token) return res.status(200).json({ status: 0, errmsg: '请登录系统', data: '' })
+  let user_id
+
+  jwt.verify(token, 'jwtkey', async (err, userInfo) => {
+    if (err) return res.status(200).json({ status: 0, errmsg: err, data: '' })
+    user_id = userInfo.id
+  })
+
+
+  const articles = await Article.findAll({ where: { user_id: user_id } })
+  const tempArticles = articles.map(item => item.dataValues)
+  const tempData = await Promise.all(tempArticles.map(async item => {
+    const likes = await LikeCollectCount.findOne({
+      where: {
+        [Op.and]: [
+          { article_id: item.id },
+          {
+            like_id: {
+              [Op.not]: null
+            }
+          }
+        ]
       }
     })
+    if (likes === null) {
+      return {
+        ...item
+      }
+    }
+    else {
+      return {
+        ...item,
+        likesUserId: likes.user_id,
+        likesUsername: likes.username,
+        createDate: likes.updatedAt
+      }
+    }
+  }))
 
+  let data
+  data = tempData.filter(item => item.likesUserId)
+  data = await Promise.all(data.map(async item => {
+    const user = await User.findByPk(item.likesUserId)
+
+    return {
+      ...item,
+      likesUserIcon: user.user_icon
+    }
+  }))
+
+  res.status(200).json({ status: 1, errmsg: '', data: data })
+
+})
+
+//message评论列表
+app.get('/api/message/commentList', async (req, res) => {
+  //获取token
+  const token = req.cookies.access_token;
+  if (!token) return res.status(200).json({ status: 0, errmsg: '请登录系统', data: '' })
+  let user_id
+
+  jwt.verify(token, 'jwtkey', async (err, userInfo) => {
+    if (err) return res.status(200).json({ status: 0, errmsg: err, data: '' })
+    user_id = userInfo.id
+  })
+
+
+  const articles = await Article.findAll({ where: { user_id: user_id } })
+  const tempArticles = articles.map(item => item.dataValues)
+  const tempData = await Promise.all(tempArticles.map(async item => {
+    const comment = await Comment.findOne({ where: { article_id: item.id } })
+
+    if (comment === null) {
+      return item
+    }
+    else {
+      return {
+        ...item,
+        comment_id: comment.id,
+        create_comment_user_id: comment.user_id,
+        comment_content: comment.content,
+        comment_create_date: comment.updatedAt
+      }
+    }
+
+  }))
+
+  let data
+  data = tempData.filter(item => item.comment_id)
+  data = await Promise.all(data.map(async item => {
+    const user = await User.findByPk(item.create_comment_user_id)
+
+    return {
+      ...item,
+      comment_user_icon: user.user_icon,
+      create_comment_username: user.username,
+    }
+  }))
+
+  res.status(200).json({ status: 1, errmsg: '', data: data })
+
+})
+
+//获取用户信息
+app.get('/api/userCenter/userInfo', async (req, res) => {
+  const { id } = req.query
+
+  //获取token
+  const token = req.cookies.access_token;
+  let current_user_id
+  jwt.verify(token, 'jwtkey', function (err, userInfo) {
+    current_user_id = userInfo.id
+  })
+
+  const user = await User.findByPk(id)
+  if(user === null) return res.status(200).json({ status: 0, errmsg: '查询不到用户', data:'', })
+  let countLook = 0
+  let countLike = 0
+  let countComment = 0
+  let countCollect= 0
+  let countReply = 0
+  const articles = await Article.findAll({ where: { user_id: id } })
+  const tempArticles = articles.map(item => item.dataValues)
+  
+
+  await Promise.all(tempArticles.map(async item => {
+    countLook += item.count
+    countLike += item.likes
+    countComment += item.comment_count
+    countCollect += item.collects
+    countReply += await Reply.count({ where: { article_id: item.id } })
+  }))
+  
+  const { ...other } = user.dataValues
+  delete other.password
+
+  return res.status(200).json({ 
+    status: 1, 
+    errmsg: '', 
+    data: {
+      ...other,
+      countLook,
+      countLike,
+      countComment,
+      countCollect,
+      countReply,
+      countArticle: articles.length || 0,
+      isMine: current_user_id === id ? true : false
+    }
   })
 })
 
-//查询指定文章
+//修改用户信息
+app.post('/api/user/updataUserInfo', async (req, res) => {
+  const {
+    id,
+    username,
+    introduction,
+    email,
+    posts,
+    company,
+  } = req.body
 
-// app.get('/', async (req, res) => {
+  const user = await User.findByPk(id)
+  user.set({
+    username,
+    introduction,
+    email,
+    posts,
+    company,
+  })
+  const updataUser = await user.save()
+  if (!updataUser) return res.status(200).json({ status: 0, errmsg: '修改失败，服务器出错', data: '' })
+  return res.status(200).json({ status: 1, errmsg: '', data: '修改成功' })
+})
+//修改用户密码
+app.post('/api/user/updataUserPassword', async (req, res) => {
+  const {
+    id,
+    current_password,
+    new_password
+  } = req.body
 
-//     // console.log(User === sequelize.models.User); // true
-//     const data = await User.findAll();
-//     console.log(data)
-//     res.send(data.map((item) => item.toJSON()));
-//   // 这里是代码
-// });
+  const user = await User.findByPk(id)
+  // 密码hash比对
+  const isTruePassword = bcrypt.compareSync(current_password, user.password)
+  if (!isTruePassword) return res.status(200).json({ status: 0, errmsg: '密码错误', data: '' })
 
+
+  //密码转hash自动加盐
+  const salt = bcrypt.genSaltSync(10);
+  const hashPassword = bcrypt.hashSync(new_password, salt);
+  user.password = hashPassword
+  const updataUser = await user.save()
+  if (!updataUser) return res.status(200).json({ status: 0, errmsg: '密码修改失败，服务器出错', data: '' })
+  return res.status(200).json({ status: 1, errmsg: '', data: '密码修改成功' })
+})
 
 //启动一个服务并监听从 3000端口进入的所有连接请求
 app.listen(PORT, function () {
